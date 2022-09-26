@@ -1,0 +1,24 @@
+-- This script serves as a controlling point for this project.
+-- After uploading the data into the SQL database the integrity of the data can be checked.
+
+-- Count the entries in the maize_yield table
+SELECT 
+	COUNT(*) AS number_yield_entries
+FROM
+		maize_yield;
+
+-- Calculate the mean of yield by country and year in the maize_yield table
+SELECT 
+	country, year,
+	AVG(yield) AS mean_yield
+FROM
+		maize_yield
+GROUP BY
+	country, year;
+
+	
+-- Count the entries in the demographic_data table
+SELECT 
+	COUNT(*) AS number_demographic_entries
+FROM
+		demographic_data;
