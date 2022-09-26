@@ -1,0 +1,702 @@
+---
+title: "Yield analysis maize part 1"
+author: "Kathi"
+output:
+  pdf_document: 
+    toc: true
+---
+# Introduction
+
+In this project I analyse yield data from a variety of crop species from 1981 - 2016.
+
+Iizumi, Toshichika (2019): Global dataset of historical yields v1.2 and v1.3 aligned version. PANGAEA, https://doi.org/10.1594/PANGAEA.909132, Supplement to: Iizumi, Toshichika; Sakai, T (2020): The global dataset of historical yields for major crops 1981–2016. Scientific Data, 7(1), https://doi.org/10.1038/s41597-020-0433-7
+(published under CC-BY-4.0 License)
+
+
+The data is stored in NetCDF-4 (Network Common Data Form, versin 4) format (.nc4). To read more about that file format follow this link: https://docs.unidata.ucar.edu/netcdf-c/current/
+
+
+Helpful websites:  
+https://www.r-bloggers.com/2016/08/a-netcdf-4-in-r-cheatsheet/
+
+https://stackoverflow.com/questions/21708488/get-country-and-continent-from-longitude-and-latitude-point-in-r
+
+https://towardsdatascience.com/the-correct-way-to-average-the-globe-92ceecd172b7
+
+http://www.idlcoyote.com/map_tips/lonconvert.html
+
+# Setup
+## Installing and loading required packages
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+# Store package names, required for the analysis in a vector
+packages <- c("tidyverse", "ncdf4",  "reshape2", "RColorBrewer", "raster", "sp", "rworldmap", "sf", "pracma", "stats", "broom", "naniar", "DBI", "RSQLite")
+
+# Install packages that are not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# Reading yield data
+## Load and investigate the first NetCDF file (single year example)
+
+This section helps to understand the structure of the files. Understanding the structure makes it easier to automatize loading multiple files from this dataset. So in a first step the yield data from one year (= one .nc4 file) will be read into memory and the data from all years will be read in in the next section.
+
+```{r}
+# Create a list of all .nc4 files in the working directory
+# This will be used to open the first file for a first investigation of the file structure
+# Later on this list is used to automatically open all .nc4 files and write the data into
+# a dataframe
+list_maize <- list.files(path = ".", pattern = ".nc4")
+
+print(list_maize)
+```
+
+```{r}
+# open the first nc file
+maize_1981 <- nc_open(paste(list_maize[1]))
+
+# Get a description of what is in the nc file
+print(maize_1981)
+
+# Save the description of the nc file in .txt format
+{
+sink(paste0(str_sub(list_maize[1], 1, 10), ".txt")) 
+  # str_sub() extracts the indicated letters from the file name 
+  # (to remove the .nc4 file ending)
+print(maize_1981)
+sink()
+}
+
+# Get a list of the NetCDF's R attributes
+print(attributes(maize_1981)$names)
+```
+The file has one variable, representing yield (in t/ha), called "var". The file has 2 dimensions, "lon" (with 720 values) and "lat" (with 360 values). The nc4 file contains a data structure, which seems to phase out of usage and is more common in scientific context of climate data analysis.
+
+```{r}
+# Read the dimensions and store them in memory
+maize_lon <- ncvar_get(maize_1981, "lon")
+maize_lat <- ncvar_get(maize_1981, "lat")
+
+# Inspect the first/last entries of the longitude and latitude vector and its structure
+head(maize_lon)
+tail(maize_lon)
+str(maize_lon)
+head(maize_lat)
+tail(maize_lat)
+str(maize_lat)
+```
+The longitude vector contains values from 0.25 - 359.75 (in 0.5 degree steps, 720 entries). This format (0 - 360) will be changed later to the more standard -180 - 180 format!
+The latitude vector contains values from -89.75 - 89.75 (in 0.5 degree steps, 360 entries).
+
+```{r}
+# Read in the data from the variable, in this data set called "var". 
+# This variable represents the amount of yield in t/ha
+# store the data in a 2-dimensional array
+maize_yield_1981_array <- ncvar_get(maize_1981, "var") 
+
+# Show the dimensions of the array
+dim(maize_yield_1981_array)
+```
+The yield data consists of an array with 720 x 360 (=259200) elements.
+The longitude values (720) are in the rows and the latitude values (360) are in the columns. In this wide format, the data is not tidy and standard data transformation operations are cumbersome to apply. Hence, the structure will be altered for data analytical purposes.
+
+
+```{r}
+# Show the fillvalue
+# The fillvalue is a variable that contains a value, that is used for missing data 
+fillvalue <- ncatt_get(maize_1981, "var", "_FillValue")
+print(fillvalue)
+
+# show the first five rows and columns of the array
+print(maize_yield_1981_array[1:5, 1:5])
+```
+The fillvalue used in this dataset is -9.99e+08. However, a closer inspection of the data in the array shows that this fill value is not used, instead the common NA is displayed for missing values.
+
+### Data tidying and cleaning
+
+```{r}
+# Replace the FillValue (-9.99e+08) with the R-standard NA
+  # But the Fillvalue seems not to have been used, so this step is not required
+# maize_yield_1981_array[maize_yield_1981_array == fillvalue$value] <- NA
+```
+
+```{r}
+# Show a short peak on a random selection of the data
+maize_yield_1981_array[1:3, 193:196]
+
+# Change the dimension names of the data array to "lon" and "lat" 
+# and the row and column names to the latitude and longitude values
+dimnames(maize_yield_1981_array) <- list(lon = maize_lon, lat = maize_lat)
+
+# Check the same selection again
+maize_yield_1981_array[1:3, 193:196]
+```
+
+```{r}
+# Close the netCDF file, as all relevant data is read into R
+nc_close(maize_1981)
+```
+
+```{r}
+# Change the data array from wide to long format
+maize_yield_1981_long <- melt(maize_yield_1981_array, value.name = "yield" )
+
+# show the head of the dataframe, ignoring NA values
+head(na.omit(maize_yield_1981_long))
+
+# show the structure of the dataframe
+str(maize_yield_1981_long)
+```
+As expected, the change from wide to long format results in a dataframe with 259200 observations.
+
+
+## Load multiple NetCDF files for analysis (data from year 1981 - 2016)
+
+With the above-gathered information about the structure of the .nc4 files it is now possible to define a function that automatically loads the available files and stores the data in long format for further analysis. 
+
+```{r}
+# Define the function to load multiple .nc4 files
+# This function uses as input a list of .nc4 file names that are supposed to be written
+# into one dataframe with the variables lon, lat, yield and year.
+# In this case each file contains worldwide maize yield data of one year, 
+# from 1981 to 2016.
+
+process_maize_yield <- function(list_maize){
+  # Create an empty dataframe called "maize_yield"
+  maize_yield = data.frame()
+
+  # iterate through the nc files
+  for (i in 1:length(list_maize)) {
+        
+        # open a connection to the nc file
+        maize_yield_tmp <- nc_open(list_maize[i])
+        
+        # store values from variables and attributes
+        maize_yield_mtx <- ncvar_get(maize_yield_tmp, 
+                                     attributes(maize_yield_tmp$var)$names[1])
+        maize_lon <- ncvar_get(maize_yield_tmp, 
+                               attributes(maize_yield_tmp$dim)$names[1])
+        maize_lat <- ncvar_get(maize_yield_tmp, 
+                               attributes(maize_yield_tmp$dim)$names[2])
+        
+        # Create a variable, based on the year of the data collected, 
+        # extracted from the file name
+        maize_year <- str_sub(list_maize[i], 7, 10)
+        
+        # close the connection since we're finished
+        nc_close(maize_yield_tmp)
+        
+        # set the dimension names and values of your matrix to the appropriate latitude
+        # and longitude values
+        dimnames(maize_yield_mtx) <- list(lon = maize_lon, lat = maize_lat)
+        
+        
+        tmp_maize_yield_df <- maize_yield_mtx %>%
+          # Store the data in long format
+          melt(value.name = "yield") %>%
+          # Add a variable, based on the year of the data collected
+          mutate(year = maize_year)
+        
+        # for debugging
+        #print(names(maize_yield))
+        #print(names(tmp_maize_yield_df))
+        
+        
+        # set the name of my new variable and bind the new data to it
+       # if (exists("maize_yield")) {
+          maize_yield <- bind_rows(maize_yield, tmp_maize_yield_df)
+        #}
+       # else {
+        #  maize_yield <- data.frame(tmp_maize_yield_df)
+       # }
+    }
+
+    return(maize_yield)
+      
+    # return(tmp_maize_yield_df)
+}
+
+# Load the data from multiple .nc4 files into one dataframe
+data <- process_maize_yield(list_maize)
+
+# Show the structure of dataframe
+str(data)
+```
+As exprected from 36 files with 259200 observations the resulting dataframe contains 9331200 observations. 
+
+# Data transformations
+## Convert the longitude format from 0 - 360 to -180 - 180
+
+The longitude information in this dataset is given in 0 - 360 format. To use the data in some of the below-described transformations it is required to change the format to the more standard -180 - 180 format. 
+
+```{r}
+# Define the function to change the longitude format from 0 - 360 to -180 - 180
+lon_to_180 <- function(lon){
+  
+  lon_180 <- ((lon + 180) %% 360) - 180
+  
+  # Output:
+  lon_180
+}
+
+# Add a column (lon_180) that contains the longitude in -180 - 180 format to the dataframe
+data <- data %>%
+  mutate(lon_180 = lon_to_180(lon)) 
+
+# Show the last entries of the lon_180 column 
+tail(data$lon_180)
+```
+
+## Convert the longitude latitude information into country/continent names and add it to the dataframe 
+
+Based on a coordinate reference system (CRS) the observations of the dataset, defined by a longitude and latitude value can be mapped on to their position on the globe. With this information it is possible to assign country/continent names according to where each point is located.
+
+The two functions coords2country and coords2continent could also be combined into one. For better control I will keep them separate.
+
+```{r}
+# The single argument to this function, points, is a data.frame in which:
+#   - column 1 contains the longitude in degrees
+#   - column 2 contains the latitude in degrees
+coords2country = function(points){
+  
+  # Access a map stored in the rworldmap package
+  countriesSP <- getMap(resolution='low')
+  
+  # set CRS (coordinate reference system) directly to that from rworldmap
+  pointsSP = SpatialPoints(points, proj4string=CRS(proj4string(countriesSP)))  
+
+  # use 'over' to get indices of the Polygons object containing each point 
+  indices = over(pointsSP, countriesSP)
+
+  # return the ADMIN names of each country
+    # ADMIn are the country names filed in the rworldmap package
+  indices$ADMIN
+  #indices$ISO3 # returns the ISO3 code 
+  #indices$continent   # returns the continent (6 continent model)
+  #indices$REGION   # returns the continent (7 continent model)
+}
+
+# Add a column called "country" to the data frame "data"
+# as the function coords2country() uses a dataframe with 2 columns (lon and lat) as input use only the "lon_180" and "lat" column of "data" as input
+data$country <- coords2country(dplyr::select(data, c("lon_180", "lat")))
+
+# Show the first entries of the country column
+head(data$country)
+```
+
+
+```{r}
+# The single argument to this function, points, is a data.frame in which:
+#   - column 1 contains the longitude in degrees
+#   - column 2 contains the latitude in degrees
+coords2continent = function(points){
+  
+  countriesSP <- getMap(resolution='low')
+  
+  # setting CRS directly to that from rworldmap
+  pointsSP = SpatialPoints(points, proj4string=CRS(proj4string(countriesSP)))  
+
+  # use 'over' to get indices of the Polygons object containing each point 
+  indices = over(pointsSP, countriesSP)
+
+  # return the ADMIN names of each country
+  indices$REGION  
+  #indices$ISO3 # returns the ISO3 code 
+  #indices$continent   # returns the continent (6 continent model)
+  #indices$REGION   # returns the continent (7 continent model)
+}
+
+# Add a column called "continent" to the data frame "data"
+data$continent <- coords2continent(dplyr::select(data, c("lon_180", "lat")))
+
+# Show the first entries of the continent column
+head(data$continent)
+```
+
+
+## Calculate the area "around" each point, defined by longitude and latitude, of the dataframe
+
+I assume that each point in the dataframe (definded by longitude and latitude) represents an area (square) around it. As the earth is not flat, the area of each square changes with its longitude. In a first step we need to calculate the earth radius in meters at each latitude. 
+
+```{r}
+# Define the function (calc_earth_radius) to calculate earth_radius in meters
+# corresponding to latitude
+# This function takes latitude (in degree) as input
+calc_earth_radius = function(lat){
+  
+  # define oblate spheroid from WGS84
+  a <- 6378137 # semi-major axis
+  b <- 6356752.3142 # semi-minor axis
+  e2 = 1 - (b^2/a^2)
+
+  # convert the input lat information from geodetic to geocentric
+  lat_rad <- deg2rad(lat)
+  lat_gc <- atan((1 - e2) * tan(lat_rad))
+
+  # calculate the radius
+  r <- ( (a * (1-e2)^0.5)  / (1 - (e2 * cos(lat_gc)^2))^0.5)
+
+  # Define the output
+  r  
+}
+
+
+# add the earth_radius per data point to the data frame
+data$earth_radius <- calc_earth_radius(data$lat)
+
+# Show the first entries of the earth_radius column
+head(data$earth_radius)
+```
+
+
+```{r}
+# Create a square "around" each long/lat point to calculate its area
+# Define the length of long and lat as the difference between one data point and the next
+# one (within the group) (lon_diff & lat_diff)
+data <- data %>%
+  # arrange the data frame by lat value in ascending orderto assure correct work of the 
+  # lead function
+  arrange(lat, lon_180) %>% 
+  group_by(year, lon_180) %>% 
+  mutate(lat_diff = lead(lat) - lat) %>%  # add the lat_diff variable (in degree)
+    # lead function returns the next point to the analysed data point
+    # as the last point within each group has no corresponding next point it returns NA
+    # as this point is at lat = 89.75, corresponding to the south pole, this value will 
+    # be dropped in further analysis, as no yield value is expected at this location
+  group_by(lat, year) %>%
+  # add the lon_diff variable (in degree)
+  mutate(lon_diff = coalesce(lead(lon_180) - lon_180, lon_180 - lag(lon_180))) 
+    # lead function returns the the next point to the analysed data point
+    # coalesce function returns the first non-missing value, which means:
+    # it returns [lead(_180) - lon_180] for every data point of that group,
+    # as the last point point has no corresponding  "next" point it will return 
+    # [lon_180 - lag(lon_180)] = "the last point - the penultimate point"
+  
+
+```
+
+
+```{r}
+# calculate the long and lat length (in m) and add it to the data frame
+# and calculate the "area of each point" 
+data <- data %>%
+  mutate(lon_m = deg2rad(lon_diff * earth_radius * cos(deg2rad(lat))),
+         lat_m = deg2rad(lat_diff * earth_radius),
+         area = lon_m *lat_m, # in m²
+         area_ha = area * 0.0001) # in ha, required as the yield data is given in t/ha
+
+# Show the first entries of the dataframe
+head(data)
+
+```
+
+This dataframe (or parts of it) will be loaded into an SQL database later.
+
+# Reading demographic data (Source: world bank)
+
+For the analysis that I am planning to do I am interested in demographic data, that I can use from The World Bank (published under CC BY 4.0 license)
+
+## References
+
+The World Bank: Population, total: (1) United Nations Population Division. World Population Prospects: 2019 Revision. (2) Census reports and other statistical publications from national statistical offices, (3) Eurostat: Demographic Statistics, (4) United Nations Statistical Division. Population and Vital Statistics Reprot (various years), (5) U.S. Census Bureau: International Database, and (6) Secretariat of the Pacific Community: Statistics and Demography Programme. 
+https://datacatalog.worldbank.org/public-licenses#cc-by
+
+
+The World Bank: GDP (current US$): World Bank national accounts data, and OECD National Accounts data files. https://datacatalog.worldbank.org/public-licenses#cc-by
+
+The World Bank: Exports of goods, services and primary income (BoP, current US$): International Monetary Fund, Balance of Payments Statistics Yearbook and data files. 
+https://datacatalog.worldbank.org/public-licenses#cc-by
+
+The World Bank: Adjusted net national income (current US$): World Bank staff estimates based on sources and methods in World Bank's "The Changing Wealth of Nations: Measuring Sustainable Development in the New Millennium" (2011).
+https://datacatalog.worldbank.org/public-licenses#cc-by
+
+The World Bank: Imports of goods, services and primary income (BoP, current US$): International Monetary Fund, Balance of Payments Statistics Yearbook and data files.
+https://datacatalog.worldbank.org/public-licenses#cc-by
+
+## Import the csv files downloaded from worldbank.org
+
+```{r}
+# Load csv files
+Population_wide <- read.csv("WorldBank_DevelopmentIndicators_Population.csv")
+GDP_wide <- read.csv("WorldBank_DevelopmentIndicators_GDP.csv")
+Income_wide <- read.csv("WorldBank_DevelopmentIndicators_Income.csv")
+Export_wide <- read.csv("WorldBank_DevelopmentIndicators_Export.csv")
+Import_wide <- read.csv("WorldBank_DevelopmentIndicators_Import.csv")
+```
+
+The data is stored in wide format, but to be compatible with the yield data it should be in long format.
+
+## Data transformation
+
+```{r}
+# Transform the data from wide to long format
+Population <- pivot_longer(Population_wide, cols = starts_with("X"), names_to = "Year")
+GDP <- pivot_longer(GDP_wide, cols = starts_with("X"), names_to = "Year")
+Income <- pivot_longer(Income_wide, cols = starts_with("X"), names_to = "Year")
+Export <- pivot_longer(Export_wide, cols = starts_with("X"), names_to = "Year")
+Import <- pivot_longer(Import_wide, cols = starts_with("X"), names_to = "Year")
+
+# rename the "value" variable in each data frame
+Population <- rename(Population, population = value)
+GDP <- rename(GDP, gdp = value)
+Income <- rename(Income, income = value)
+Export <- rename(Export, export = value)
+Import <- rename(Import, import = value)
+
+# Delete unnecessary columns
+Population_clean <- subset(Population, select = -c(Series.Name, Series.Code, Country.Code))
+GDP_clean <- subset(GDP, select = -c(Series.Name, Series.Code, Country.Code))
+Income_clean <- subset(Income, select = -c(Series.Name, Series.Code, Country.Code))
+Export_clean <- subset(Export, select = -c(Series.Name, Series.Code, Country.Code))
+Import_clean <- subset(Import, select = -c(Series.Name, Series.Code, Country.Code))
+
+# Merge the dataframes into one
+demographic_data <- Population_clean %>%
+  inner_join(GDP_clean, by = c("Country.Name", "Year")) %>%
+  inner_join(Income_clean, by = c("Country.Name", "Year")) %>%
+  inner_join(Export_clean, by = c("Country.Name", "Year")) %>%
+  inner_join(Import_clean, by = c("Country.Name", "Year"))
+
+# redefine the "Year" variable to only contain string 2 - 5, naming it "year"
+demographic_data$year <- substring(demographic_data$Year, 2,5)
+
+
+# Replace missing values that are labelled ".." with NA
+demographic_data_clean <- demographic_data %>%
+  subset(select = -c(Year)) %>%
+  replace_with_na(replace = list(population = "..", 
+                                 gdp = "..", 
+                                 income = "..", 
+                                 export = "..", 
+                                 import = ".."))
+
+# Rename the Country.Name column in demographic_data_clean and remove duplicates
+demographic_data_clean <- demographic_data_clean %>%
+  rename(., country = Country.Name) %>%
+  distinct() # remove duplicates!
+```
+
+## Data cleaning
+### Check if Country Names are written similarly in both dataframes that will be uploaded to SQL
+
+```{r}
+# Extract levels attribute of country variable from both dataframes 
+data_country_names <- levels(data$country)
+demographic_country_names <- levels(as.factor(demographic_data_clean$country))
+
+# Extract overlapping and unique country names for both dataframes
+overlap_country_names <-  intersect(data_country_names, demographic_country_names)
+unique_data_country_names <- setdiff(data_country_names, demographic_country_names)
+unique_demographic_country_names <- setdiff(demographic_country_names, data_country_names)
+```
+
+179 country names are found in both datasets, which represents 73 %  of the country names in the yield dataset (244).
+
+
+```{r}
+# Print unique country names from both datasets
+print(unique_data_country_names)
+print(unique_demographic_country_names)
+```
+
+A comparison by hand easily identifies simple differences in the naming of the same country that will be changed in the "demographic_data_clean" dataframe to overlap with the names from "data".
+
+```{r}
+# Relabel country names in the demographic dataframe
+demographic_data_clean[demographic_data_clean == "Bahamas, The"] <- "The Bahamas"
+demographic_data_clean[demographic_data_clean == "Brunei Darussalam"] <- "Brunei"
+demographic_data_clean[demographic_data_clean == "Cabo Verde"] <- "Cape Verde"
+demographic_data_clean[demographic_data_clean == "Congo, Dem. Rep."] <- "Democratic Republic of the Congo"
+demographic_data_clean[demographic_data_clean == "Congo, Rep."] <- "Republic of the Congo"
+demographic_data_clean[demographic_data_clean == "Cote d'Ivoire"] <- "Ivory Coast"
+demographic_data_clean[demographic_data_clean == "Egypt, Arab Rep."] <- "Egypt"
+demographic_data_clean[demographic_data_clean == "Eswatini"] <- "Swaziland"
+demographic_data_clean[demographic_data_clean == "Gambia, The"] <- "Gambia"
+demographic_data_clean[demographic_data_clean == "Guinea-Bissau"] <- "Guinea Bissau"
+demographic_data_clean[demographic_data_clean == "Hong Kong SAR, China"] <- "Hong Kong S.A.R."
+demographic_data_clean[demographic_data_clean == "Iran, Islamic Rep."] <- "Iran"
+demographic_data_clean[demographic_data_clean == "Korea, Dem. People's Rep."] <- "North Korea"
+demographic_data_clean[demographic_data_clean == "Korea, Rep."] <- "South Korea"
+demographic_data_clean[demographic_data_clean == "Kyrgyz Republic"] <- "Kyrgyzstan"
+demographic_data_clean[demographic_data_clean == "Lao PDR"] <- "Laos"
+demographic_data_clean[demographic_data_clean == "Macao SAR, China"] <- "Macau S.A.R"
+demographic_data_clean[demographic_data_clean == "Micronesia, Fed. Sts."] <- "Federated States of Micronesia"
+demographic_data_clean[demographic_data_clean == "North Macedonia"] <- "Macedonia"
+demographic_data_clean[demographic_data_clean == "Russian Federation"] <- "Russia"
+demographic_data_clean[demographic_data_clean == "Serbia"] <- "Republic of Serbia"
+demographic_data_clean[demographic_data_clean == "Sint Maarten (Dutch part)"] <- "Sint Maarten"
+demographic_data_clean[demographic_data_clean == "Slovak Republic"] <- "Slovakia"
+demographic_data_clean[demographic_data_clean == "St. Kitts and Nevis"] <- "Saint Kitts and Nevis"
+demographic_data_clean[demographic_data_clean == "St. Lucia"] <- "Saint Lucia"
+demographic_data_clean[demographic_data_clean == "St. Martin (French part)"] <- "Saint Martin"
+demographic_data_clean[demographic_data_clean == "St. Vincent and the Grenadines"] <- "Saint Vincent and the Grenadines"
+demographic_data_clean[demographic_data_clean == "Syrian Arab Republic"] <- "Syria"
+demographic_data_clean[demographic_data_clean == "Tanzania"] <- "United Republic of Tanzania"
+demographic_data_clean[demographic_data_clean == "Timor-Leste"] <- "East Timor"
+demographic_data_clean[demographic_data_clean == "Turkiye"] <- "Turkey"
+demographic_data_clean[demographic_data_clean == "United States"] <- "United States of America"
+demographic_data_clean[demographic_data_clean == "Venezuela, RB"] <- "Venezuela"
+demographic_data_clean[demographic_data_clean == "Virgin Islands (U.S.)"] <- "United States Virgin Islands"
+demographic_data_clean[demographic_data_clean == "Yemen, Rep."] <- "Yemen"
+```
+
+```{r}
+# Recheck which countries are still unique
+data_country_names <- levels(data$country)
+demographic_country_names <- levels(as.factor(demographic_data_clean$country))
+
+overlap_country_names <-  intersect(data_country_names, demographic_country_names)
+unique_data_country_names <- setdiff(data_country_names, demographic_country_names)
+unique_demographic_country_names <- setdiff(demographic_country_names, data_country_names)
+
+print(unique_data_country_names)
+print(unique_demographic_country_names)
+```
+
+# Upload data into a SQL database
+
+The data is now in a format that could be used for further analysis. Therefore it will be uploaded into an SQL database from which it can be retrieved in a second R script (the analysis script).
+
+## Create a connection to the DB
+
+```{r}
+# Create a "connection object"
+con = dbConnect(
+  drv = RSQLite::SQLite(),
+  dbname = "yield.db"
+)
+```
+
+## Create a new table in a DB
+
+```{r}
+# Check the structure of the data that should be uploaded
+str(data)
+
+# Drop a table if it already exists
+DDL_query = "
+    DROP TABLE IF EXISTS maize_yield;"
+ 
+rs <- dbSendQuery(con, DDL_query)
+
+# Create table in the SQL database
+DDL_query = "    
+    CREATE TABLE  maize_yield (
+	    lon_180 NUMERIC,
+   	  lat NUMERIC,
+   	  yield NUMERIC,
+   	  year Text,
+   	  country Text,
+   	  continent Text,
+   	  area_ha NUMERIC,
+	  PRIMARY KEY (lon_180, lat, year)
+);
+  "
+rs <- dbSendQuery(con, DDL_query)
+
+print(rs)
+```
+
+```{r}
+# Check if the table exists
+query = "SELECT name FROM sqlite_master WHERE type='table' AND name='maize_yield';"
+
+rs <- dbFetch(dbSendQuery(con, query))
+
+print(rs)
+```
+
+### Add data to the table
+
+```{r}
+# Select the columns of the dataframes that are supposed to be uploaded
+data %>%
+  dplyr::select("lon_180", "lat", "yield", "year", "country", "continent", "area_ha") %>%
+#  print(.)
+
+# Add the data 
+dbAppendTable(
+  conn = con,
+  name = "maize_yield", # name of the table you want to add data to
+  value = .
+  )
+```
+
+### check the rows in the table
+
+```{r}
+# Select all rows from the table
+query = "SELECT 
+          *
+          
+         FROM maize_yield
+         LIMIT 5;"
+
+rs <- dbFetch(dbSendQuery(con, query))
+
+print(rs)
+```
+
+## Create a second table
+
+```{r}
+# Drop the table if it already exists
+DDL_query = "
+    DROP TABLE IF EXISTS demographic_data;"
+
+rs <- dbSendQuery(con, DDL_query)
+
+# Create the table
+DDL_query = "    
+    CREATE TABLE  demographic_data (
+      country Text,
+   	  population NUMERIC,
+   	  gdp NUMERIC,
+   	  income NUMERIC,
+   	  export NUMERIC,
+   	  import NUMERIC,
+   	  year Text,
+	  PRIMARY KEY (country, year)
+);
+  "
+
+rs <- dbSendQuery(con, DDL_query)
+
+print(rs)
+```
+
+### Add data to the table
+
+```{r}
+dbAppendTable(
+  conn = con,
+  name = "demographic_data", # name of the table you want to add data to
+  value = demographic_data_clean
+  )
+```
+
+### check the rows in the table
+
+```{r}
+query = "SELECT 
+          * 
+         
+         FROM demographic_data
+         LIMIT 5;"
+
+rs <- dbFetch(dbSendQuery(con, query))
+
+print(rs)
+```
+
+
+## disconnect
+```{r}
+dbDisconnect(con)
+```
